@@ -1,0 +1,222 @@
+const hmacsha1 = require('hmacsha1');
+const JSON = require('json-bigint');
+
+const helper = {
+  DEFAULT_UA: 'Cloudflare workers',
+  DEFAULT_CLIENT: 'Cloudflare',
+};
+
+function firstLetterUpper(str) {
+  return str.slice(0, 1).toUpperCase() + str.slice(1);
+}
+
+function formatParams(params) {
+  var keys = Object.keys(params);
+  var newParams = {};
+  for (var i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    newParams[firstLetterUpper(key)] = params[key];
+  }
+  return newParams;
+}
+
+function pad2(num) {
+  if (num < 10) {
+    return '0' + num;
+  }
+  return '' + num;
+}
+
+function timestamp() {
+  var date = new Date();
+  var YYYY = date.getUTCFullYear();
+  var MM = pad2(date.getUTCMonth() + 1);
+  var DD = pad2(date.getUTCDate());
+  var HH = pad2(date.getUTCHours());
+  var mm = pad2(date.getUTCMinutes());
+  var ss = pad2(date.getUTCSeconds());
+  // 删除掉毫秒部分
+  return `${YYYY}-${MM}-${DD}T${HH}:${mm}:${ss}Z`;
+}
+
+function encode(str) {
+  var result = encodeURIComponent(str);
+
+  return result
+    .replace(/!/g, '%21')
+    .replace(/'/g, '%27')
+    .replace(/\(/g, '%28')
+    .replace(/\)/g, '%29')
+    .replace(/\*/g, '%2A');
+}
+
+function replaceRepeatList(target, key, repeat) {
+  for (var i = 0; i < repeat.length; i++) {
+    var item = repeat[i];
+
+    if (Array.isArray(item)) {
+      replaceRepeatList(target, `${key}.${i + 1}`, item);
+    } else if (item && typeof item === 'object') {
+      const keys = Object.keys(item);
+      for (var j = 0; j < keys.length; j++) {
+        if (Array.isArray(item[keys[j]])) {
+          replaceRepeatList(target, `${key}.${i + 1}.${keys[j]}`, item[keys[j]]);
+        } else {
+          target[`${key}.${i + 1}.${keys[j]}`] = item[keys[j]];
+        }
+      }
+    } else {
+      target[`${key}.${i + 1}`] = item;
+    }
+  }
+}
+
+function flatParams(params) {
+  var target = {};
+  var keys = Object.keys(params);
+  for (let i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var value = params[key];
+    if (Array.isArray(value)) {
+      replaceRepeatList(target, key, value);
+    } else {
+      target[key] = value;
+    }
+  }
+  return target;
+}
+
+function normalize(params) {
+  var list = [];
+  var flated = flatParams(params);
+  var keys = Object.keys(flated).sort();
+  for (let i = 0; i < keys.length; i++) {
+    var key = keys[i];
+    var value = flated[key];
+    list.push([encode(key), encode(value)]); //push []
+  }
+  return list;
+}
+
+function canonicalize(normalized) {
+  var fields = [];
+  for (var i = 0; i < normalized.length; i++) {
+    var [key, value] = normalized[i];
+    fields.push(key + '=' + value);
+  }
+  return fields.join('&');
+}
+
+class RPCClient {
+  constructor(config, verbose) {
+    if (!config.endpoint.startsWith('https://') && !config.endpoint.startsWith('http://')) {
+      throw new Error(`"config.endpoint" must starts with 'https://' or 'http://'.`);
+    }
+    var accessKeySecret = config.secretAccessKey || config.accessKeySecret;
+
+    if (config.endpoint.endsWith('/')) {
+      config.endpoint = config.endpoint.slice(0, -1);
+    }
+
+    this.endpoint = config.endpoint;
+    this.apiVersion = config.apiVersion;
+    this.accessKeyId = config.accessKeyId;
+    this.accessKeySecret = accessKeySecret;
+    this.securityToken = config.securityToken;
+    this.verbose = verbose === true;
+    // 非 codes 里的值，将抛出异常
+    this.codes = new Set([200, '200', 'OK', 'Success', 'success']);
+    if (config.codes) {
+      // 合并 codes
+      for (var elem of config.codes) {
+        this.codes.add(elem);
+      }
+    }
+
+    this.opts = config.opts || {};
+  }
+
+  request(action, params = {}, opts = {}) {
+    // 1. compose params and opts
+    opts = Object.assign(
+      {
+        headers: {
+          'x-sdk-client': helper.DEFAULT_CLIENT,
+          'user-agent': helper.DEFAULT_UA,
+          'x-acs-action': action,
+          'x-acs-version': this.apiVersion,
+        },
+      },
+      this.opts,
+      opts
+    );
+
+    // format action until formatAction is false
+    if (opts.formatAction !== false) {
+      action = firstLetterUpper(action);
+    }
+
+    // format params until formatParams is false
+    if (opts.formatParams !== false) {
+      params = formatParams(params);
+    }
+    var defaults = this._buildParams();
+    params = Object.assign({ Action: action }, defaults, params);
+
+    // 2. caculate signature
+    var method = (opts.method || 'GET').toUpperCase();
+    var normalized = normalize(params);
+    var canonicalized = canonicalize(normalized);
+    // 2.1 get string to sign
+    var stringToSign = `${method}&${encode('/')}&${encode(canonicalized)}`;
+    // 2.2 get signature
+    const key = this.accessKeySecret + '&';
+    var signature = hmacsha1(key, stringToSign);
+    // add signature
+    normalized.push(['Signature', encode(signature)]);
+    // 3. generate final url
+    const url = opts.method === 'POST' ? `${this.endpoint}/` : `${this.endpoint}/?${canonicalize(normalized)}`;
+    // 4. send request
+    var entry = {
+      url: url,
+      request: null,
+      response: null,
+    };
+
+    if (opts.method === 'POST') {
+      opts.headers = opts.headers || {};
+      opts.headers['content-type'] = 'application/x-www-form-urlencoded';
+      opts.body = canonicalize(normalized);
+    }
+
+    return fetch(url, opts).then((response) => {
+      entry.request = {
+        headers: opts.headers,
+      };
+      entry.response = {
+        statusCode: response.status,
+        headers: response.headers,
+      };
+
+      return response.json();
+    });
+  }
+
+  _buildParams() {
+    var defaultParams = {
+      Format: 'JSON',
+      SignatureMethod: 'HMAC-SHA1',
+      SignatureNonce: Date.now() + parseInt(Math.random() * 100000),
+      SignatureVersion: '1.0',
+      Timestamp: timestamp(),
+      AccessKeyId: this.accessKeyId,
+      Version: this.apiVersion,
+    };
+    if (this.securityToken) {
+      defaultParams.SecurityToken = this.securityToken;
+    }
+    return defaultParams;
+  }
+}
+
+module.exports = RPCClient;
