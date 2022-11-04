@@ -1,30 +1,36 @@
-/**
- * Welcome to Cloudflare Workers! This is your first worker.
- *
- * - Run `wrangler dev src/index.ts` in your terminal to start a development server
- * - Open a browser tab at http://localhost:8787/ to see your worker in action
- * - Run `wrangler publish src/index.ts --name my-worker` to publish your worker
- *
- * Learn more at https://developers.cloudflare.com/workers/
- */
+import DDNSController from './controller/DDNSController';
+import utils from './utils';
+import CODES from './config/code';
 
-export interface Env {
-	// Example binding to KV. Learn more at https://developers.cloudflare.com/workers/runtime-apis/kv/
-	// MY_KV_NAMESPACE: KVNamespace;
-	//
-	// Example binding to Durable Object. Learn more at https://developers.cloudflare.com/workers/runtime-apis/durable-objects/
-	// MY_DURABLE_OBJECT: DurableObjectNamespace;
-	//
-	// Example binding to R2. Learn more at https://developers.cloudflare.com/workers/runtime-apis/r2/
-	// MY_BUCKET: R2Bucket;
-}
+const logger = utils.logger('Index');
 
 export default {
-	async fetch(
-		request: Request,
-		env: Env,
-		ctx: ExecutionContext
-	): Promise<Response> {
-		return new Response("Hello World!");
-	},
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
+    const { pathname = '', params = {} } = utils.request.parse(request);
+    const [type] = pathname.split('/').filter((_) => _); // 兼容一下无聊多写几个斜杠的情况
+    const { debug } = params;
+
+    try {
+      const controller = new DDNSController(type, request);
+      const result = await controller.update();
+      logger.info(`result`, result);
+
+      const { code } = result || {};
+
+      // 不对外暴露未知的错误，防止一些代码没处理好导致隐私问题
+      if (String(debug) !== '1' && CODES[code]) {
+        const content = JSON.stringify({ code, message: '更新失败' });
+        return new Response(content);
+      }
+
+      const content = JSON.stringify(result);
+      return new Response(content);
+    } catch (e) {
+      if (String(debug) === '1') {
+        return new Response(e.message);
+      }
+
+      return new Response('', { status: 404 });
+    }
+  },
 };

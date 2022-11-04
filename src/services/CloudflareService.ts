@@ -184,7 +184,7 @@ export default class CloudflareService {
       }
     } catch (e) {
       logger.error(`更新 ${domain} 的 ${record} 的 ${type} 记录出现未知错误，错误信息：${e.message}, 堆栈：${e.stack}`);
-      result = { code: CODES.UNKNOW_ERROR, message: '请求错误', data: e?.data };
+      result = { code: CODES.UNKNOWN_ERROR, message: '请求错误', data: e?.data };
     }
 
     return result;

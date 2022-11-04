@@ -3,10 +3,20 @@ export * from './DNSPodTypes';
 export * from './CloudflareTypes';
 export * from './AliyunTypes';
 
-
 export enum DDNSTypes {
-  DNSPod = 'dp',
+  /**
+   * 阿里云
+   */
   Aliyun = 'ali',
+
+  /**
+   * 腾讯云DNSPod
+   */
+  DNSPod = 'dp',
+
+  /**
+   * Cloudflare
+   */
   Cloudflare = 'cf',
 }
 
@@ -42,11 +52,9 @@ export interface IDDNSUpdateOptions {
  * DNSPod Types Declare
  */
 
-
 /**
  * Aliyun Types Declare
  */
-
 
 /**
  * Cloudflare Types Declare
